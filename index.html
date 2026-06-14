@@ -5,7 +5,6 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>💕 我们的小世界 - kdx0716.com</title>
     <link href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@400;600;700&family=Noto+Sans+SC:wght@300;400;500;700&display=swap" rel="stylesheet">
-    <script src="https://cdn.bmobapp.com/Bmob-2.4.0.min.js"></script>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         :root {
@@ -112,12 +111,15 @@
         .sync-status { position: fixed; top: 80px; right: 20px; padding: 8px 16px; border-radius: 20px; background: var(--glass-bg); backdrop-filter: blur(10px); border: 1px solid var(--glass-border); font-size: 0.85rem; color: var(--text-secondary); z-index: 999; display: flex; align-items: center; gap: 6px; transition: all 0.3s; }
         .sync-status.online { color: #22c55e; }
         .sync-status.offline { color: #ef4444; }
+        .sync-status.local { color: #f59e0b; }
         .sync-dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
         .login-modal .modal-content { background: var(--glass-bg); backdrop-filter: blur(30px); border: 1px solid var(--glass-border); border-radius: 24px; padding: 40px; max-width: 420px; width: 100%; box-shadow: var(--shadow-lg); text-align: center; }
         .login-modal h2 { font-family: 'Noto Serif SC', serif; font-size: 1.8rem; margin-bottom: 8px; background: linear-gradient(135deg, var(--primary), var(--secondary)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; }
         .login-modal .subtitle { color: var(--text-secondary); margin-bottom: 28px; font-size: 0.95rem; }
         .login-hint { margin-top: 16px; font-size: 0.8rem; color: var(--text-secondary); }
         .login-hint code { background: rgba(255,107,157,0.1); padding: 2px 6px; border-radius: 4px; color: var(--primary); font-family: monospace; }
+        .retry-btn { margin-top: 12px; padding: 8px 20px; border: 1px solid var(--primary-light); border-radius: 16px; background: transparent; color: var(--primary); font-size: 0.85rem; cursor: pointer; transition: all 0.3s; }
+        .retry-btn:hover { background: var(--primary); color: white; }
         @media (max-width: 600px) { .hero h1{font-size:1.8rem} .days-count{font-size:3rem} .timeline{padding-left:30px} .timeline-dot{left:-28px} .gallery-grid{grid-template-columns:repeat(2,1fr)} .nav-links{gap:4px} .nav-btn{padding:6px 12px; font-size:0.8rem} }
         ::-webkit-scrollbar { width: 8px; }
         ::-webkit-scrollbar-track { background: transparent; }
@@ -128,11 +130,11 @@
     <div class="floating-hearts" id="floatingHearts"></div>
     <div class="loading-overlay" id="loadingOverlay">
         <div class="loading-spinner"></div>
-        <div class="loading-text">正在同步云端数据...</div>
+        <div class="loading-text" id="loadingText">正在初始化...</div>
     </div>
     <div class="sync-status" id="syncStatus">
         <div class="sync-dot"></div>
-        <span>连接中...</span>
+        <span id="syncStatusText">连接中...</span>
     </div>
     <nav class="navbar" id="navbar" style="display:none;">
         <div class="logo">💕 kdx0716</div>
@@ -160,13 +162,13 @@
             <div class="upload-area" onclick="document.getElementById('fileInput').click()" ondrop="handleDrop(event)" ondragover="handleDragOver(event)" ondragleave="handleDragLeave(event)">
                 <span class="upload-icon">📸</span>
                 <div class="upload-text">点击或拖拽上传照片/视频</div>
-                <div class="upload-hint">照片会实时同步到云端，对方刷新即可看到</div>
+                <div class="upload-hint" id="uploadHint">照片会实时同步到云端，对方刷新即可看到</div>
                 <input type="file" id="fileInput" multiple accept="image/*,video/*" onchange="handleFileSelect(event)">
             </div>
             <div id="timeline-container">
                 <div class="empty-state">
                     <div class="icon">📝</div>
-                    <p>正在从云端加载回忆...</p>
+                    <p>正在加载回忆...</p>
                 </div>
             </div>
         </div>
@@ -235,6 +237,8 @@
             <button class="submit-btn" onclick="doLogin()">🔓 进入我们的空间</button>
             <div class="login-hint">
                 <p>默认密码：<code>040716</code></p>
+                <button class="retry-btn" id="retryBtn" onclick="retryCloud()" style="display:none;">🔄 重新连接云端</button>
+                <p id="offlineHint" style="margin-top:8px; font-size:0.75rem; color:#f59e0b;"></p>
             </div>
         </div>
     </div>
@@ -250,30 +254,100 @@
         let anniversary = '2024-01-01';
         let tempFiles = [];
         let isOnline = false;
+        let bmobLoaded = false;
 
+        // 初始化
         document.addEventListener('DOMContentLoaded', () => {
             createFloatingHearts();
             document.getElementById('entryDate').value = new Date().toISOString().split('T')[0];
             document.getElementById('anniversaryDate').value = anniversary;
 
-            Bmob.initialize(BMOB_SECRET_KEY, BMOB_API_KEY);
-
+            // 检查本地登录状态
             const savedAuth = localStorage.getItem('couple_auth');
             if (savedAuth === COUPLE_PASSWORD) {
                 showMainApp();
-                initCloudSync();
+                initApp();
             } else {
                 document.getElementById('loginModal').classList.add('active');
+                // 尝试预加载 Bmob，但不阻塞登录界面
+                loadBmobScript();
             }
         });
 
+        // 加载 Bmob 脚本（带超时）
+        function loadBmobScript() {
+            return new Promise((resolve, reject) => {
+                const script = document.createElement('script');
+                script.src = 'https://cdn.bmobapp.com/Bmob-2.4.0.min.js';
+                script.onload = () => { bmobLoaded = true; resolve(); };
+                script.onerror = () => reject(new Error('Bmob CDN 加载失败'));
+
+                // 10秒超时
+                setTimeout(() => {
+                    if (!bmobLoaded) reject(new Error('Bmob 加载超时'));
+                }, 10000);
+
+                document.head.appendChild(script);
+            });
+        }
+
+        // 初始化应用
+        async function initApp() {
+            showLoading('正在连接云端...');
+
+            try {
+                // 如果脚本还没加载，先加载
+                if (!bmobLoaded && typeof Bmob === 'undefined') {
+                    await loadBmobScript();
+                }
+
+                // 初始化 Bmob
+                if (typeof Bmob !== 'undefined') {
+                    Bmob.initialize(BMOB_SECRET_KEY, BMOB_API_KEY);
+                    await loadFromCloud();
+                    updateSyncStatus(true);
+                    isOnline = true;
+                    document.getElementById('uploadHint').textContent = '照片会实时同步到云端，对方刷新即可看到';
+                } else {
+                    throw new Error('Bmob 不可用');
+                }
+            } catch(e) {
+                console.error('云端连接失败:', e);
+                updateSyncStatus('local');
+                isOnline = false;
+                document.getElementById('uploadHint').textContent = '当前为本地模式，照片仅保存在本设备';
+
+                // 从本地加载
+                const local = localStorage.getItem('couple_entries_backup');
+                if (local) {
+                    entries = JSON.parse(local);
+                    anniversary = localStorage.getItem('couple_anniversary') || '2024-01-01';
+                }
+                renderAll();
+                updateAnniversary();
+
+                // 显示重试按钮
+                document.getElementById('retryBtn').style.display = 'inline-block';
+                document.getElementById('offlineHint').textContent = '云端连接失败，已切换本地模式，数据暂存本设备';
+            }
+
+            hideLoading();
+        }
+
+        // 重试连接云端
+        async function retryCloud() {
+            document.getElementById('offlineHint').textContent = '正在重新连接...';
+            await initApp();
+        }
+
+        // 登录
         function doLogin() {
             const pwd = document.getElementById('loginPassword').value;
             if (pwd === COUPLE_PASSWORD) {
                 localStorage.setItem('couple_auth', COUPLE_PASSWORD);
                 closeLoginModal();
                 showMainApp();
-                initCloudSync();
+                initApp();
             } else {
                 alert('密码错误，请重试');
             }
@@ -289,52 +363,53 @@
             document.getElementById('fabBtn').style.display = 'flex';
         }
 
-        async function initCloudSync() {
-            showLoading('正在连接云端...');
-            try {
-                await loadFromCloud();
-                updateSyncStatus(true);
-                isOnline = true;
-            } catch(e) {
-                console.error('云端连接失败:', e);
-                updateSyncStatus(false);
-                const local = localStorage.getItem('couple_entries_backup');
-                if (local) {
-                    entries = JSON.parse(local);
-                    renderAll();
-                }
-            }
-            hideLoading();
-        }
-
+        // 从云端加载
         async function loadFromCloud() {
-            const annivQuery = Bmob.Query('Anniversary');
-            const annivResult = await annivQuery.find();
-            if (annivResult && annivResult.length > 0) {
-                anniversary = annivResult[0].date || '2024-01-01';
-                updateAnniversary();
+            // 加载纪念日
+            try {
+                const annivQuery = Bmob.Query('Anniversary');
+                const annivResult = await annivQuery.find();
+                if (annivResult && annivResult.length > 0) {
+                    anniversary = annivResult[0].date || '2024-01-01';
+                    updateAnniversary();
+                }
+            } catch(e) { console.log('纪念日加载失败:', e); }
+
+            // 加载记录
+            try {
+                const query = Bmob.Query('CoupleEntry');
+                query.order('-createdAt');
+                query.limit(1000);
+                const results = await query.find();
+
+                entries = results.map(r => ({
+                    id: r.entryId || r.objectId,
+                    date: r.date,
+                    content: r.content || '',
+                    files: r.files || [],
+                    objectId: r.objectId
+                }));
+
+                localStorage.setItem('couple_entries_backup', JSON.stringify(entries));
+                localStorage.setItem('couple_anniversary', anniversary);
+            } catch(e) {
+                console.log('记录加载失败:', e);
+                const local = localStorage.getItem('couple_entries_backup');
+                if (local) entries = JSON.parse(local);
             }
 
-            const query = Bmob.Query('CoupleEntry');
-            query.order('-createdAt');
-            query.limit(1000);
-            const results = await query.find();
-
-            entries = results.map(r => ({
-                id: r.entryId || r.objectId,
-                date: r.date,
-                content: r.content || '',
-                files: r.files || [],
-                objectId: r.objectId
-            }));
-
-            localStorage.setItem('couple_entries_backup', JSON.stringify(entries));
-            localStorage.setItem('couple_anniversary', anniversary);
             renderAll();
+            updateAnniversary();
         }
 
+        // 保存到云端
         async function saveToCloud(entry) {
-            if (!isOnline) return;
+            if (!isOnline || typeof Bmob === 'undefined') {
+                // 本地模式：只存本地
+                localStorage.setItem('couple_entries_backup', JSON.stringify(entries));
+                return;
+            }
+
             showLoading('正在同步到云端...');
             try {
                 const pointer = Bmob.Query('CoupleEntry');
@@ -344,18 +419,21 @@
                 obj.set('content', entry.content);
                 obj.set('files', entry.files);
                 await obj.save();
+
                 localStorage.setItem('couple_entries_backup', JSON.stringify(entries));
                 updateSyncStatus(true);
             } catch(e) {
                 console.error('同步失败:', e);
-                updateSyncStatus(false);
-                alert('同步失败，请检查网络');
+                updateSyncStatus('local');
+                localStorage.setItem('couple_entries_backup', JSON.stringify(entries));
+                alert('云端同步失败，已保存到本地。请检查网络后重试连接云端。');
             }
             hideLoading();
         }
 
+        // 删除云端记录
         async function deleteFromCloud(entryId) {
-            if (!isOnline) return;
+            if (!isOnline || typeof Bmob === 'undefined') return;
             try {
                 const query = Bmob.Query('CoupleEntry');
                 query.equalTo('entryId', '==', entryId);
@@ -370,8 +448,12 @@
             }
         }
 
+        // 保存纪念日到云端
         async function saveAnniversaryToCloud(date) {
-            if (!isOnline) return;
+            if (!isOnline || typeof Bmob === 'undefined') {
+                localStorage.setItem('couple_anniversary', date);
+                return;
+            }
             try {
                 const query = Bmob.Query('Anniversary');
                 const results = await query.find();
@@ -385,12 +467,30 @@
                     obj.set('date', date);
                     await obj.save();
                 }
+                localStorage.setItem('couple_anniversary', date);
             } catch(e) {
                 console.error('纪念日同步失败:', e);
+                localStorage.setItem('couple_anniversary', date);
             }
         }
 
+        // 上传文件到 Bmob
         async function uploadFileToCloud(file) {
+            if (!isOnline || typeof Bmob === 'undefined') {
+                // 本地模式：转 Base64 存本地
+                return new Promise((resolve) => {
+                    const reader = new FileReader();
+                    reader.onload = (e) => {
+                        resolve({
+                            type: file.type.startsWith('video') ? 'video' : 'image',
+                            data: e.target.result,
+                            name: file.name
+                        });
+                    };
+                    reader.readAsDataURL(file);
+                });
+            }
+
             return new Promise((resolve, reject) => {
                 const bmobFile = new Bmob.File(file.name, file);
                 bmobFile.save().then(res => {
@@ -405,25 +505,31 @@
             });
         }
 
-        function updateSyncStatus(online) {
-            const status = document.getElementById('syncStatus');
-            if (online) {
-                status.className = 'sync-status online';
-                status.innerHTML = '<div class="sync-dot"></div><span>云端已同步</span>';
+        // UI 更新
+        function updateSyncStatus(status) {
+            const el = document.getElementById('syncStatus');
+            const text = document.getElementById('syncStatusText');
+            if (status === true) {
+                el.className = 'sync-status online';
+                text.textContent = '云端已同步';
+            } else if (status === 'local') {
+                el.className = 'sync-status local';
+                text.textContent = '本地模式';
             } else {
-                status.className = 'sync-status offline';
-                status.innerHTML = '<div class="sync-dot"></div><span>离线模式</span>';
+                el.className = 'sync-status offline';
+                text.textContent = '离线模式';
             }
         }
 
         function showLoading(text) {
-            document.querySelector('.loading-text').textContent = text;
+            document.getElementById('loadingText').textContent = text;
             document.getElementById('loadingOverlay').classList.add('active');
         }
         function hideLoading() {
             document.getElementById('loadingOverlay').classList.remove('active');
         }
 
+        // 创建漂浮心形
         function createFloatingHearts() {
             const container = document.getElementById('floatingHearts');
             const hearts = ['💕','💖','💗','💓','💝','🌸','✨'];
@@ -522,6 +628,7 @@
             renderVideos();
         }
 
+        // 文件处理
         async function handleFileSelect(event) {
             const files = Array.from(event.target.files);
             await processFiles(files);
@@ -540,7 +647,8 @@
         async function processFiles(files) {
             const today = new Date().toISOString().split('T')[0];
             const entry = { id: Date.now(), date: today, content: '', files: [] };
-            showLoading('正在上传照片到云端...');
+
+            showLoading(isOnline ? '正在上传照片到云端...' : '正在保存到本地...');
             try {
                 for (const file of files) {
                     const cloudFile = await uploadFileToCloud(file);
@@ -551,11 +659,12 @@
                 renderAll();
             } catch(e) {
                 console.error('上传失败:', e);
-                alert('上传失败，请检查网络');
+                alert('上传失败，请重试');
             }
             hideLoading();
         }
 
+        // 添加记录
         function openAddModal() {
             document.getElementById('addModal').classList.add('active');
             document.getElementById('entryDate').value = new Date().toISOString().split('T')[0];
@@ -571,7 +680,7 @@
             const previewArea = document.getElementById('previewArea');
             previewArea.innerHTML = '';
             tempFiles = [];
-            showLoading('正在上传附件...');
+            showLoading(isOnline ? '正在上传附件...' : '正在处理附件...');
             try {
                 for (const file of files) {
                     const cloudFile = await uploadFileToCloud(file);
@@ -584,7 +693,7 @@
                     previewArea.appendChild(div);
                 }
             } catch(e) {
-                alert('附件上传失败');
+                alert('附件处理失败');
             }
             hideLoading();
         }
@@ -614,19 +723,20 @@
             }
         }
 
+        // 纪念日
         function openDateModal() { document.getElementById('dateModal').classList.add('active'); }
         function closeDateModal() { document.getElementById('dateModal').classList.remove('active'); }
         async function saveAnniversary() {
             const date = document.getElementById('anniversaryDate').value;
             if (date) {
                 anniversary = date;
-                localStorage.setItem('couple_anniversary', anniversary);
                 await saveAnniversaryToCloud(date);
                 updateAnniversary();
                 closeDateModal();
             }
         }
 
+        // 预览
         function openPreview(data, type) {
             const modal = document.getElementById('previewModal');
             const content = document.getElementById('previewContent');
