@@ -248,13 +248,13 @@
         const BMOB_SECRET_KEY = '4456d17c884862c5';
         const BMOB_API_KEY = '75e9e8d5850fe2520d83693b33b408ae';
         const COUPLE_PASSWORD = '040716';
+        const BMOB_BASE_URL = 'https://api2.bmobapp.com';
         // ============================================================
 
         let entries = [];
         let anniversary = '2024-01-01';
         let tempFiles = [];
         let isOnline = false;
-        let bmobLoaded = false;
 
         // 初始化
         document.addEventListener('DOMContentLoaded', () => {
@@ -262,33 +262,64 @@
             document.getElementById('entryDate').value = new Date().toISOString().split('T')[0];
             document.getElementById('anniversaryDate').value = anniversary;
 
-            // 检查本地登录状态
             const savedAuth = localStorage.getItem('couple_auth');
             if (savedAuth === COUPLE_PASSWORD) {
                 showMainApp();
                 initApp();
             } else {
                 document.getElementById('loginModal').classList.add('active');
-                // 尝试预加载 Bmob，但不阻塞登录界面
-                loadBmobScript();
             }
         });
 
-        // 加载 Bmob 脚本（带超时）
-        function loadBmobScript() {
-            return new Promise((resolve, reject) => {
-                const script = document.createElement('script');
-                script.src = 'https://cdn.bmobapp.com/Bmob-2.4.0.min.js';
-                script.onload = () => { bmobLoaded = true; resolve(); };
-                script.onerror = () => reject(new Error('Bmob CDN 加载失败'));
+        // Bmob REST API 封装
+        async function bmobRequest(method, path, body) {
+            const url = BMOB_BASE_URL + path;
+            const headers = {
+                'X-Bmob-Application-Id': BMOB_SECRET_KEY,
+                'X-Bmob-REST-API-Key': BMOB_API_KEY,
+                'Content-Type': 'application/json'
+            };
 
-                // 10秒超时
-                setTimeout(() => {
-                    if (!bmobLoaded) reject(new Error('Bmob 加载超时'));
-                }, 10000);
+            const options = {
+                method: method,
+                headers: headers
+            };
 
-                document.head.appendChild(script);
+            if (body && (method === 'POST' || method === 'PUT')) {
+                options.body = JSON.stringify(body);
+            }
+
+            const response = await fetch(url, options);
+            if (!response.ok) {
+                const error = await response.text();
+                throw new Error(error);
+            }
+            return await response.json();
+        }
+
+        // 上传文件到 Bmob（使用 REST API）
+        async function uploadFileToBmob(file) {
+            // 1. 获取上传地址
+            const uploadToken = await bmobRequest('POST', '/2/files/' + file.name, {});
+            const uploadUrl = uploadToken.url;
+            const cdnUrl = uploadToken.cdn;
+
+            // 2. 上传文件到七牛
+            const formData = new FormData();
+            formData.append('file', file);
+
+            const uploadResponse = await fetch(uploadUrl, {
+                method: 'POST',
+                body: formData
             });
+
+            if (!uploadResponse.ok) throw new Error('文件上传失败');
+
+            return {
+                type: file.type.startsWith('video') ? 'video' : 'image',
+                data: cdnUrl,
+                name: file.name
+            };
         }
 
         // 初始化应用
@@ -296,21 +327,14 @@
             showLoading('正在连接云端...');
 
             try {
-                // 如果脚本还没加载，先加载
-                if (!bmobLoaded && typeof Bmob === 'undefined') {
-                    await loadBmobScript();
-                }
+                // 测试连接：查询纪念日表
+                const testResult = await bmobRequest('GET', '/1/classes/Anniversary?limit=1');
+                console.log('Bmob 连接成功:', testResult);
 
-                // 初始化 Bmob
-                if (typeof Bmob !== 'undefined') {
-                    Bmob.initialize(BMOB_SECRET_KEY, BMOB_API_KEY);
-                    await loadFromCloud();
-                    updateSyncStatus(true);
-                    isOnline = true;
-                    document.getElementById('uploadHint').textContent = '照片会实时同步到云端，对方刷新即可看到';
-                } else {
-                    throw new Error('Bmob 不可用');
-                }
+                await loadFromCloud();
+                updateSyncStatus(true);
+                isOnline = true;
+                document.getElementById('uploadHint').textContent = '照片会实时同步到云端，对方刷新即可看到';
             } catch(e) {
                 console.error('云端连接失败:', e);
                 updateSyncStatus('local');
@@ -326,15 +350,14 @@
                 renderAll();
                 updateAnniversary();
 
-                // 显示重试按钮
                 document.getElementById('retryBtn').style.display = 'inline-block';
-                document.getElementById('offlineHint').textContent = '云端连接失败，已切换本地模式，数据暂存本设备';
+                document.getElementById('offlineHint').textContent = '云端连接失败，已切换本地模式。请检查网络或稍后重试。';
             }
 
             hideLoading();
         }
 
-        // 重试连接云端
+        // 重试连接
         async function retryCloud() {
             document.getElementById('offlineHint').textContent = '正在重新连接...';
             await initApp();
@@ -367,31 +390,28 @@
         async function loadFromCloud() {
             // 加载纪念日
             try {
-                const annivQuery = Bmob.Query('Anniversary');
-                const annivResult = await annivQuery.find();
-                if (annivResult && annivResult.length > 0) {
-                    anniversary = annivResult[0].date || '2024-01-01';
+                const annivResult = await bmobRequest('GET', '/1/classes/Anniversary?limit=1');
+                if (annivResult.results && annivResult.results.length > 0) {
+                    anniversary = annivResult.results[0].date || '2024-01-01';
                     updateAnniversary();
                 }
             } catch(e) { console.log('纪念日加载失败:', e); }
 
             // 加载记录
             try {
-                const query = Bmob.Query('CoupleEntry');
-                query.order('-createdAt');
-                query.limit(1000);
-                const results = await query.find();
+                const result = await bmobRequest('GET', '/1/classes/CoupleEntry?order=-createdAt&limit=1000');
+                if (result.results) {
+                    entries = result.results.map(r => ({
+                        id: r.entryId || r.objectId,
+                        date: r.date,
+                        content: r.content || '',
+                        files: r.files || [],
+                        objectId: r.objectId
+                    }));
 
-                entries = results.map(r => ({
-                    id: r.entryId || r.objectId,
-                    date: r.date,
-                    content: r.content || '',
-                    files: r.files || [],
-                    objectId: r.objectId
-                }));
-
-                localStorage.setItem('couple_entries_backup', JSON.stringify(entries));
-                localStorage.setItem('couple_anniversary', anniversary);
+                    localStorage.setItem('couple_entries_backup', JSON.stringify(entries));
+                    localStorage.setItem('couple_anniversary', anniversary);
+                }
             } catch(e) {
                 console.log('记录加载失败:', e);
                 const local = localStorage.getItem('couple_entries_backup');
@@ -404,21 +424,19 @@
 
         // 保存到云端
         async function saveToCloud(entry) {
-            if (!isOnline || typeof Bmob === 'undefined') {
-                // 本地模式：只存本地
+            if (!isOnline) {
                 localStorage.setItem('couple_entries_backup', JSON.stringify(entries));
                 return;
             }
 
             showLoading('正在同步到云端...');
             try {
-                const pointer = Bmob.Query('CoupleEntry');
-                const obj = pointer.newObject();
-                obj.set('entryId', entry.id);
-                obj.set('date', entry.date);
-                obj.set('content', entry.content);
-                obj.set('files', entry.files);
-                await obj.save();
+                await bmobRequest('POST', '/1/classes/CoupleEntry', {
+                    entryId: entry.id,
+                    date: entry.date,
+                    content: entry.content,
+                    files: entry.files
+                });
 
                 localStorage.setItem('couple_entries_backup', JSON.stringify(entries));
                 updateSyncStatus(true);
@@ -426,21 +444,19 @@
                 console.error('同步失败:', e);
                 updateSyncStatus('local');
                 localStorage.setItem('couple_entries_backup', JSON.stringify(entries));
-                alert('云端同步失败，已保存到本地。请检查网络后重试连接云端。');
+                alert('云端同步失败，已保存到本地');
             }
             hideLoading();
         }
 
         // 删除云端记录
         async function deleteFromCloud(entryId) {
-            if (!isOnline || typeof Bmob === 'undefined') return;
+            if (!isOnline) return;
             try {
-                const query = Bmob.Query('CoupleEntry');
-                query.equalTo('entryId', '==', entryId);
-                const results = await query.find();
-                if (results && results.length > 0) {
-                    for (const r of results) {
-                        await r.destroy();
+                const result = await bmobRequest('GET', '/1/classes/CoupleEntry?where=' + encodeURIComponent(JSON.stringify({entryId: entryId})));
+                if (result.results) {
+                    for (const r of result.results) {
+                        await bmobRequest('DELETE', '/1/classes/CoupleEntry/' + r.objectId);
                     }
                 }
             } catch(e) {
@@ -450,34 +466,24 @@
 
         // 保存纪念日到云端
         async function saveAnniversaryToCloud(date) {
-            if (!isOnline || typeof Bmob === 'undefined') {
-                localStorage.setItem('couple_anniversary', date);
-                return;
-            }
+            localStorage.setItem('couple_anniversary', date);
+            if (!isOnline) return;
             try {
-                const query = Bmob.Query('Anniversary');
-                const results = await query.find();
-                if (results && results.length > 0) {
-                    const obj = results[0];
-                    obj.set('date', date);
-                    await obj.save();
+                const result = await bmobRequest('GET', '/1/classes/Anniversary?limit=1');
+                if (result.results && result.results.length > 0) {
+                    await bmobRequest('PUT', '/1/classes/Anniversary/' + result.results[0].objectId, {date: date});
                 } else {
-                    const pointer = Bmob.Query('Anniversary');
-                    const obj = pointer.newObject();
-                    obj.set('date', date);
-                    await obj.save();
+                    await bmobRequest('POST', '/1/classes/Anniversary', {date: date});
                 }
-                localStorage.setItem('couple_anniversary', date);
             } catch(e) {
                 console.error('纪念日同步失败:', e);
-                localStorage.setItem('couple_anniversary', date);
             }
         }
 
-        // 上传文件到 Bmob
+        // 处理文件上传
         async function uploadFileToCloud(file) {
-            if (!isOnline || typeof Bmob === 'undefined') {
-                // 本地模式：转 Base64 存本地
+            if (!isOnline) {
+                // 本地模式：转 Base64
                 return new Promise((resolve) => {
                     const reader = new FileReader();
                     reader.onload = (e) => {
@@ -491,18 +497,7 @@
                 });
             }
 
-            return new Promise((resolve, reject) => {
-                const bmobFile = new Bmob.File(file.name, file);
-                bmobFile.save().then(res => {
-                    resolve({
-                        type: file.type.startsWith('video') ? 'video' : 'image',
-                        data: res[0] || res.url,
-                        name: file.name
-                    });
-                }).catch(err => {
-                    reject(err);
-                });
-            });
+            return await uploadFileToBmob(file);
         }
 
         // UI 更新
